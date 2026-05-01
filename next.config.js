@@ -2,7 +2,10 @@
 const nextConfig = {
   reactStrictMode: true,
   experimental: {
-    serverComponentsExternalPackages: [],
+    serverComponentsExternalPackages: [
+      '@opentelemetry/sdk-trace-node',
+      '@opentelemetry/exporter-trace-otlp-proto',
+    ],
   },
 }
 

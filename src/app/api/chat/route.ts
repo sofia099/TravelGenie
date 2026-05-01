@@ -1,6 +1,14 @@
 import { NextRequest } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
+import { SpanStatusCode } from '@opentelemetry/api'
+import {
+  SemanticConventions,
+  OpenInferenceSpanKind,
+  INPUT_VALUE,
+  OUTPUT_VALUE,
+} from '@arizeai/openinference-semantic-conventions'
 import { toolDefinitions, executeTool } from '@/lib/tools'
+import { tracer } from '@/lib/tracing'
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -11,11 +19,6 @@ const SYSTEM_PROMPT = `You are TravelGenie, an expert AI travel assistant. You h
 When helping with hotels, note that you can provide recommendations and pricing information, but you currently cannot verify real-time room availability. Be transparent about this limitation — do not guess or assume a hotel is available if you haven't confirmed it with a tool.
 
 Always be warm, enthusiastic, and professional. Format responses clearly with relevant details like prices, times, and confirmation numbers when available.`
-
-export interface Message {
-  role: 'user' | 'assistant'
-  content: string | Anthropic.ContentBlock[]
-}
 
 const MAX_ITERATIONS = 10
 
@@ -32,147 +35,126 @@ export async function POST(req: NextRequest) {
     }
 
     const encoder = new TextEncoder()
+    const lastUserMessage = messages[messages.length - 1]?.content || ''
 
     const stream = new ReadableStream({
       async start(controller) {
         const sendChunk = (data: object) => {
-          const line = JSON.stringify(data) + '\n'
-          controller.enqueue(encoder.encode(line))
+          controller.enqueue(encoder.encode(JSON.stringify(data) + '\n'))
         }
 
-        try {
-          // Build the conversation history for the agentic loop
-          // We need to maintain a mutable copy to append tool results
-          const conversationHistory: Anthropic.MessageParam[] = messages.map((m) => ({
-            role: m.role,
-            content: m.content,
-          }))
+        // ── CHAIN span wraps the entire agent turn ────────────────────────
+        await tracer.startActiveSpan('chat-agent', async (chainSpan) => {
+          chainSpan.setAttribute(SemanticConventions.OPENINFERENCE_SPAN_KIND, OpenInferenceSpanKind.CHAIN)
+          chainSpan.setAttribute(INPUT_VALUE, lastUserMessage)
 
-          let iterations = 0
+          let fullText = ''
 
-          // ── Agentic Loop ──────────────────────────────────────────────────
-          while (iterations < MAX_ITERATIONS) {
-            iterations++
+          try {
+            const conversationHistory: Anthropic.MessageParam[] = messages.map((m) => ({
+              role: m.role,
+              content: m.content,
+            }))
 
-            const response = await anthropic.messages.create({
-              model: 'claude-haiku-4-5-20251001',
-              max_tokens: 4096,
-              system: SYSTEM_PROMPT,
-              tools: toolDefinitions,
-              messages: conversationHistory,
-            })
+            let iterations = 0
 
-            // Stream text content blocks immediately
-            for (const block of response.content) {
-              if (block.type === 'text' && block.text) {
-                sendChunk({ type: 'text', content: block.text })
+            // ── Agentic Loop ──────────────────────────────────────────────
+            while (iterations < MAX_ITERATIONS) {
+              iterations++
+
+              const response = await anthropic.messages.create({
+                model: 'claude-haiku-4-5-20251001',
+                max_tokens: 4096,
+                system: SYSTEM_PROMPT,
+                tools: toolDefinitions,
+                messages: conversationHistory,
+              })
+
+              for (const block of response.content) {
+                if (block.type === 'text' && block.text) {
+                  fullText += block.text
+                  sendChunk({ type: 'text', content: block.text })
+                }
               }
-            }
 
-            // If Claude is done, exit the loop
-            if (response.stop_reason === 'end_turn') {
-              break
-            }
-
-            // If Claude wants to use tools, process them
-            if (response.stop_reason === 'tool_use') {
-              const toolUseBlocks = response.content.filter(
-                (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use'
-              )
-
-              if (toolUseBlocks.length === 0) {
+              if (response.stop_reason === 'end_turn') {
                 break
               }
 
-              // Add Claude's response (with tool_use blocks) to history
-              conversationHistory.push({
-                role: 'assistant',
-                content: response.content,
-              })
+              if (response.stop_reason === 'tool_use') {
+                const toolUseBlocks = response.content.filter(
+                  (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use'
+                )
 
-              // Execute all tools and build the tool_result message
-              const toolResults: Anthropic.ToolResultBlockParam[] = []
+                if (toolUseBlocks.length === 0) break
 
-              for (const toolUse of toolUseBlocks) {
-                const toolInput = toolUse.input as Record<string, unknown>
+                conversationHistory.push({ role: 'assistant', content: response.content })
 
-                // Notify the client that a tool is being called
-                sendChunk({
-                  type: 'tool_call',
-                  id: toolUse.id,
-                  name: toolUse.name,
-                  input: toolInput,
-                  status: 'running',
-                })
+                const toolResults: Anthropic.ToolResultBlockParam[] = []
 
-                let toolResult: string
-                try {
-                  toolResult = await executeTool(toolUse.name, toolInput)
-                } catch (err) {
-                  toolResult = JSON.stringify({
-                    success: false,
-                    error: err instanceof Error ? err.message : 'Tool execution failed',
+                for (const toolUse of toolUseBlocks) {
+                  const toolInput = toolUse.input as Record<string, unknown>
+
+                  sendChunk({ type: 'tool_call', id: toolUse.id, name: toolUse.name, input: toolInput, status: 'running' })
+
+                  // ── TOOL span wraps each tool execution ───────────────
+                  const toolResult = await tracer.startActiveSpan(toolUse.name, async (toolSpan) => {
+                    toolSpan.setAttribute(SemanticConventions.OPENINFERENCE_SPAN_KIND, OpenInferenceSpanKind.TOOL)
+                    toolSpan.setAttribute(INPUT_VALUE, JSON.stringify(toolInput))
+
+                    let result: string
+                    try {
+                      result = await executeTool(toolUse.name, toolInput)
+                      toolSpan.setAttribute(OUTPUT_VALUE, result)
+                      toolSpan.setStatus({ code: SpanStatusCode.OK })
+                    } catch (err) {
+                      result = JSON.stringify({
+                        success: false,
+                        error: err instanceof Error ? err.message : 'Tool execution failed',
+                      })
+                      toolSpan.setAttribute(OUTPUT_VALUE, result)
+                      toolSpan.setStatus({ code: SpanStatusCode.ERROR })
+                    } finally {
+                      toolSpan.end()
+                    }
+                    return result
                   })
+
+                  let parsedResult: unknown
+                  try { parsedResult = JSON.parse(toolResult) } catch { parsedResult = toolResult }
+
+                  sendChunk({ type: 'tool_call', id: toolUse.id, name: toolUse.name, input: toolInput, result: parsedResult, status: 'done' })
+
+                  toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: toolResult })
                 }
 
-                // Parse result for display
-                let parsedResult: unknown
-                try {
-                  parsedResult = JSON.parse(toolResult)
-                } catch {
-                  parsedResult = toolResult
-                }
-
-                // Notify client with the result
-                sendChunk({
-                  type: 'tool_call',
-                  id: toolUse.id,
-                  name: toolUse.name,
-                  input: toolInput,
-                  result: parsedResult,
-                  status: 'done',
-                })
-
-                toolResults.push({
-                  type: 'tool_result',
-                  tool_use_id: toolUse.id,
-                  content: toolResult,
-                })
+                conversationHistory.push({ role: 'user', content: toolResults })
+                continue
               }
 
-              // Add all tool results to history in a single user message
-              conversationHistory.push({
-                role: 'user',
-                content: toolResults,
-              })
-
-              // Continue the loop — Claude will now process the tool results
-              continue
+              break
             }
 
-            // Any other stop reason (max_tokens, stop_sequence, etc.) — exit
-            break
-          }
+            if (iterations >= MAX_ITERATIONS) {
+              const note = '\n\n*Note: Reached maximum processing steps. Please try a simpler request.*'
+              fullText += note
+              sendChunk({ type: 'text', content: note })
+            }
 
-          if (iterations >= MAX_ITERATIONS) {
-            sendChunk({
-              type: 'text',
-              content:
-                '\n\n*Note: Reached maximum processing steps. Please try a simpler request.*',
-            })
+            chainSpan.setAttribute(OUTPUT_VALUE, fullText)
+            chainSpan.setStatus({ code: SpanStatusCode.OK })
+            sendChunk({ type: 'done' })
+          } catch (err) {
+            console.error('Agentic loop error:', err)
+            chainSpan.setStatus({ code: SpanStatusCode.ERROR })
+            if (err instanceof Error) chainSpan.recordException(err)
+            sendChunk({ type: 'error', message: err instanceof Error ? err.message : 'An unexpected error occurred' })
+            sendChunk({ type: 'done' })
+          } finally {
+            chainSpan.end()
+            controller.close()
           }
-
-          sendChunk({ type: 'done' })
-        } catch (err) {
-          console.error('Agentic loop error:', err)
-          sendChunk({
-            type: 'error',
-            message: err instanceof Error ? err.message : 'An unexpected error occurred',
-          })
-          sendChunk({ type: 'done' })
-        } finally {
-          controller.close()
-        }
+        })
       },
     })
 
@@ -187,10 +169,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error('Route handler error:', err)
     return new Response(
-      JSON.stringify({
-        error: 'Internal server error',
-        message: err instanceof Error ? err.message : 'Unknown error',
-      }),
+      JSON.stringify({ error: err instanceof Error ? err.message : 'Unknown error' }),
       { status: 500, headers: { 'Content-Type': 'application/json' } }
     )
   }

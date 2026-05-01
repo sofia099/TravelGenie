@@ -23,7 +23,7 @@ This demo walks through the full AI observability lifecycle — from a broken pr
 | 🏗️ **Build** | See the app running, witness the bug | 5 min |
 | 🔭 **Instrument** | Add Arize tracing with one Claude Code skill | 10 min |
 | 🔥 **Break It** | Generate 20 traces across all query types | 5 min |
-| 📊 **Evaluate** | Create LLM-as-judge evaluators with Arize | 10 min |
+| 📊 **Evaluate** | Discover existing LLM provider, then create LLM-as-judge evaluators | 10 min |
 | 🔍 **Diagnose** | Analyze scores, find the root cause | 10 min |
 | 🌿 **Branch** | Create a git worktree for parallel development | 10 min |
 | 🧪 **Experiment** | Validate the fix with Arize Experiments before shipping | 15 min |
@@ -59,7 +59,7 @@ claude --version     # Should return a version number
 ### Start the App
 
 ```bash
-cd my_demo
+cd TravelGenie
 npm install
 cp .env.example .env.local
 # Open .env.local and add your ANTHROPIC_API_KEY
@@ -99,10 +99,10 @@ The scary part? It sounds completely convincing. Without observability, you'd ne
 
 Right now, our app is a black box. Requests go in, responses come out, and we have no visibility into what the agent is doing between those two points. We're going to change that in the next 10 minutes without writing a single line of boilerplate.
 
-Open a new Claude Code session in the `my_demo` directory:
+Open a new Claude Code session in the `TravelGenie` directory:
 
 ```bash
-cd my_demo
+cd TravelGenie
 claude
 ```
 
@@ -180,7 +180,7 @@ Send one test query through the UI. Then open [app.arize.com](https://app.arize.
 One trace is interesting. Twenty traces across different query types is a dataset. We need enough volume to make the evaluators meaningful.
 
 ```bash
-# From the my_demo directory
+# From the TravelGenie directory
 node scripts/generate-test-traces.js
 ```
 
@@ -228,13 +228,43 @@ After the script finishes, go to [app.arize.com](https://app.arize.com). You sho
 
 We can see the issue by eyeballing one trace. But we need to *quantify* it across all 20 traces, and we need language a product manager or executive can understand. That's what evaluators are for.
 
+Before creating evaluators we need a judge model. Rather than configuring a new one from scratch, we'll check what LLM providers are already connected to the Arize space.
+
+### Step 4a — Discover Your Existing LLM Provider
+
 Back in your Claude Code session:
+
+```bash
+/arize-ai-provider-integration
+```
+
+The skill lists every LLM integration registered in your space. You'll see output like:
+
+```
+Found 1 AI provider integration(s):
+
+ID:       int_abc123
+Name:     My OpenAI Integration
+Provider: openai
+Models:   gpt-4o, gpt-4o-mini
+Status:   active
+```
+
+Note the **integration ID** and the **model name** you want to use for judging — a fast, cheap model (e.g. `gpt-4o-mini`) is ideal for eval workloads. You'll reference both when creating each evaluator below.
+
+> **If the list is empty:** run `/arize-ai-provider-integration` and follow the prompts to connect a provider. The skill supports OpenAI, Anthropic, Azure OpenAI, AWS Bedrock, Vertex AI, Gemini, and others.
+
+### Step 4b — Create the Evaluators
+
+Now invoke the evaluator skill:
 
 ```bash
 /arize-evaluator
 ```
 
-The skill will ask about your use case. Describe it: *"I have a travel AI assistant that uses tool calls to search flights and hotels. I suspect it's hallucinating hotel availability instead of calling a tool. I want evaluators to measure hallucination, response correctness, and whether it's using tools appropriately."*
+The skill will ask about your use case. Describe it: *"I have a travel AI assistant that uses tool calls to search flights and hotels. I suspect it's hallucinating hotel availability instead of calling a tool. I want evaluators to measure hallucination, response correctness, and whether it's using tools appropriately. Use the LLM provider integration I already have configured."*
+
+When the skill asks which model to use for judging, provide the integration ID and model name you found in Step 4a.
 
 ### Evaluator 1: Hallucination Detector
 
@@ -266,7 +296,8 @@ Return your score and a one-sentence explanation.
 
 **Configuration:**
 - Name: `hallucination_detector`
-- Model: `claude-haiku-4-5` (fast and cheap for eval workloads)
+- Provider integration: *(the ID returned by `/arize-ai-provider-integration`)*
+- Model: *(the model you selected in Step 4a, e.g. `gpt-4o-mini`)*
 - Runs on: All spans where `span.kind = LLM`
 - Column mappings: `input → input.value`, `output → output.value`, `tool_calls → llm.tool_calls`
 
@@ -300,7 +331,8 @@ Return your score and a one-sentence explanation.
 
 **Configuration:**
 - Name: `response_correctness`
-- Model: `claude-haiku-4-5`
+- Provider integration: *(same integration ID from Step 4a)*
+- Model: *(same model from Step 4a)*
 - Runs on: All root spans
 
 ### Evaluator 3: Tool Calling Completeness
@@ -335,7 +367,8 @@ Return your score and a one-sentence explanation citing the specific uncovered c
 
 **Configuration:**
 - Name: `tool_calling_completeness`
-- Model: `claude-haiku-4-5`
+- Provider integration: *(same integration ID from Step 4a)*
+- Model: *(same model from Step 4a)*
 - Runs on: All spans where tool calls are expected
 - Column mappings: include `tool_definitions → llm.tools`
 
@@ -344,13 +377,13 @@ Return your score and a one-sentence explanation citing the specific uncovered c
 After the skill creates all three evaluators, trigger them to run against the 20 traces:
 
 ```bash
-# The skill will show you this command
+# The skill will show you these commands
 ax tasks trigger-run --evaluator hallucination_detector --project travelgenie-assistant
 ax tasks trigger-run --evaluator response_correctness --project travelgenie-assistant
 ax tasks trigger-run --evaluator tool_calling_completeness --project travelgenie-assistant
 ```
 
-Evaluators typically finish within 2-5 minutes. While they run, walk the audience through what's happening: Arize is spinning up an LLM for each trace, feeding it the context, and returning a structured score with an explanation. This is automated, reproducible quality measurement at scale.
+Evaluators typically finish within 2-5 minutes. While they run, walk the audience through what's happening: Arize sends each trace to your already-configured LLM provider, gets a structured score back, and stores the result alongside the original span — no extra API keys, no new model setup, just reusing the integration you already have.
 
 ---
 
@@ -398,7 +431,7 @@ Git worktrees solve this elegantly. A worktree is a separate checkout of your re
 First, make sure your code is committed and pushed to GitHub:
 
 ```bash
-cd my_demo
+cd TravelGenie
 git init
 git add .
 git commit -m "feat: initial TravelGenie app with intentional missing tool bug"
@@ -416,7 +449,7 @@ git worktree add ../travelgenie-fix fix/hotel-availability-tool
 # Verify you now have two worktrees
 git worktree list
 # Output:
-# /path/to/my_demo              <commit-hash> [main]
+# /path/to/TravelGenie              <commit-hash> [main]
 # /path/to/travelgenie-fix      <commit-hash> [fix/hotel-availability-tool]
 ```
 
@@ -428,7 +461,7 @@ Open two terminal windows:
 
 **Terminal 1 — Production (buggy, keep collecting traces):**
 ```bash
-cd my_demo
+cd TravelGenie
 npm run dev
 # Running on http://localhost:3000
 ```
@@ -454,7 +487,7 @@ Running both simultaneously means:
 
 ```bash
 # Claude Code session 1 — staying on main (observing production)
-cd my_demo
+cd TravelGenie
 claude
 # Inside: /arize-evaluator  (keep evaluating production traces)
 
@@ -712,7 +745,7 @@ git worktree remove ../travelgenie-fix
 # Verify it's gone
 git worktree list
 # Output:
-# /path/to/my_demo    <commit-hash> [main]
+# /path/to/TravelGenie    <commit-hash> [main]
 ```
 
 ---
@@ -724,7 +757,8 @@ In ~70 minutes, we went from "users are complaining about hotel bookings" to a m
 | Skill | What It Did | Time Saved |
 |---|---|---|
 | `arize-instrumentation` | Added full OpenTelemetry tracing with OTEL + Arize exporter, including manual spans for the agentic loop | ~2 hours of boilerplate setup |
-| `arize-evaluator` | Created 3 LLM-as-judge evaluators tailored to our travel assistant use case, with column mappings and trigger configuration | ~1 day of eval engineering and prompt tuning |
+| `arize-ai-provider-integration` | Listed existing LLM integrations in the space; surfaced the provider and model to use as the eval judge — no new API keys or model config needed | ~30 min of dashboard navigation and credential hunting |
+| `arize-evaluator` | Created 3 LLM-as-judge evaluators wired to the existing provider integration, with column mappings and trigger configuration | ~1 day of eval engineering and prompt tuning |
 | `arize-experiment` | Ran two parallel experiments on a 20-query dataset and produced a side-by-side comparison with statistical scores | ~1 week of A/B test infrastructure setup and analysis |
 
 ### Key Takeaways
@@ -814,11 +848,12 @@ ax experiments create \
 
 ### Claude Code Skills Used in This Demo
 ```bash
-/arize-instrumentation   # Add Arize OTEL tracing to an app
-/arize-evaluator         # Create and run LLM-as-judge evaluators
-/arize-experiment        # Run comparative experiments on datasets
-/arize-dataset           # Create and manage evaluation datasets
-/arize-trace             # Inspect and debug individual traces
+/arize-instrumentation          # Add Arize OTEL tracing to an app
+/arize-ai-provider-integration  # List/manage LLM provider integrations in your space
+/arize-evaluator                # Create and run LLM-as-judge evaluators
+/arize-experiment               # Run comparative experiments on datasets
+/arize-dataset                  # Create and manage evaluation datasets
+/arize-trace                    # Inspect and debug individual traces
 ```
 
 ### Vercel Deployment

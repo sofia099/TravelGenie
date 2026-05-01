@@ -18,7 +18,7 @@ This app is designed as a demo for showcasing **Arize AI observability**. It shi
 ## Quick Start
 
 ```bash
-cd my_demo
+cd TravelGenie
 npm install
 cp .env.example .env.local
 # Fill in your API keys (see Environment Variables section below)
@@ -126,7 +126,7 @@ Once pushed, you can use git worktrees to work on the bug fix in a separate dire
 ## Project Structure
 
 ```
-my_demo/
+TravelGenie/
 ├── src/
 │   ├── app/
 │   │   ├── api/

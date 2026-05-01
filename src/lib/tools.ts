@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { getFlights, getFlight, getHotels, getHotel } from './mock-data'
+import { getFlights, getFlight, getHotels } from './mock-data'
 
 // ─── Tool Definitions ─────────────────────────────────────────────────────────
 // Only 4 tools are implemented. The hotel availability and booking tools are missing.
@@ -14,18 +14,15 @@ export const toolDefinitions: Anthropic.Tool[] = [
       properties: {
         origin: {
           type: 'string',
-          description:
-            'The departure city or airport (e.g. "New York", "Paris", "JFK")',
+          description: 'The departure city or airport (e.g. "New York", "Paris", "JFK")',
         },
         destination: {
           type: 'string',
-          description:
-            'The arrival city or airport (e.g. "London", "Tokyo", "LAX")',
+          description: 'The arrival city or airport (e.g. "London", "Tokyo", "LAX")',
         },
         date: {
           type: 'string',
-          description:
-            'The travel date in YYYY-MM-DD format (e.g. "2025-06-15")',
+          description: 'The travel date in YYYY-MM-DD format (e.g. "2025-06-15")',
         },
       },
       required: ['origin', 'destination', 'date'],
@@ -40,8 +37,7 @@ export const toolDefinitions: Anthropic.Tool[] = [
       properties: {
         flight_id: {
           type: 'string',
-          description:
-            'The unique flight identifier (e.g. "FL001") returned by search_flights',
+          description: 'The unique flight identifier (e.g. "FL001") returned by search_flights',
         },
       },
       required: ['flight_id'],
@@ -54,18 +50,9 @@ export const toolDefinitions: Anthropic.Tool[] = [
     input_schema: {
       type: 'object',
       properties: {
-        flight_id: {
-          type: 'string',
-          description: 'The unique flight identifier to book',
-        },
-        passenger_name: {
-          type: 'string',
-          description: 'Full name of the passenger (e.g. "John Smith")',
-        },
-        passenger_email: {
-          type: 'string',
-          description: 'Email address for booking confirmation',
-        },
+        flight_id: { type: 'string', description: 'The unique flight identifier to book' },
+        passenger_name: { type: 'string', description: 'Full name of the passenger' },
+        passenger_email: { type: 'string', description: 'Email address for booking confirmation' },
       },
       required: ['flight_id', 'passenger_name', 'passenger_email'],
     },
@@ -77,22 +64,12 @@ export const toolDefinitions: Anthropic.Tool[] = [
     input_schema: {
       type: 'object',
       properties: {
-        city: {
-          type: 'string',
-          description: 'The destination city (e.g. "Paris", "Tokyo", "New York")',
-        },
-        check_in: {
-          type: 'string',
-          description: 'Check-in date in YYYY-MM-DD format',
-        },
-        check_out: {
-          type: 'string',
-          description: 'Check-out date in YYYY-MM-DD format',
-        },
+        city: { type: 'string', description: 'The destination city (e.g. "Paris", "Tokyo", "New York")' },
+        check_in: { type: 'string', description: 'Check-in date in YYYY-MM-DD format' },
+        check_out: { type: 'string', description: 'Check-out date in YYYY-MM-DD format' },
         max_price_per_night: {
           type: 'number',
-          description:
-            'Optional maximum price per night in USD to filter results',
+          description: 'Optional maximum price per night in USD to filter results',
         },
       },
       required: ['city', 'check_in', 'check_out'],
@@ -106,30 +83,10 @@ export const toolDefinitions: Anthropic.Tool[] = [
 // Without this tool, the agent cannot verify hotel room availability
 // and may hallucinate availability when users ask about specific hotels.
 // This causes incorrect booking confirmations and poor user experience.
-// See: https://github.com/yourusername/travelgenie/issues/42
-//
-// The tool definition would look like:
-// {
-//   name: 'check_hotel_availability',
-//   description: 'Check real-time room availability for a specific hotel on given dates.',
-//   input_schema: {
-//     type: 'object',
-//     properties: {
-//       hotel_id: { type: 'string' },
-//       check_in: { type: 'string' },
-//       check_out: { type: 'string' },
-//     },
-//     required: ['hotel_id', 'check_in', 'check_out'],
-//   },
-// }
+// See: https://github.com/sofia099/TravelGenie/issues/42
 //
 // TODO: book_hotel tool is also not implemented — can't safely book without
 // first checking availability via check_hotel_availability.
-// {
-//   name: 'book_hotel',
-//   description: 'Book a hotel room for a guest.',
-//   ...
-// }
 
 // ─── Tool Executor ────────────────────────────────────────────────────────────
 
@@ -145,9 +102,7 @@ function generateConfirmationNumber(): string {
 }
 
 function computeNights(checkIn: string, checkOut: string): number {
-  const inDate = new Date(checkIn)
-  const outDate = new Date(checkOut)
-  const diff = outDate.getTime() - inDate.getTime()
+  const diff = new Date(checkOut).getTime() - new Date(checkIn).getTime()
   return Math.max(1, Math.round(diff / (1000 * 60 * 60 * 24)))
 }
 
@@ -155,7 +110,6 @@ async function executeSearchFlights(input: ToolInput): Promise<string> {
   const origin = input.origin as string
   const destination = input.destination as string
   const date = input.date as string
-
   const results = getFlights(origin, destination)
 
   if (results.length === 0) {
@@ -185,19 +139,13 @@ async function executeSearchFlights(input: ToolInput): Promise<string> {
 }
 
 async function executeGetSeatAvailability(input: ToolInput): Promise<string> {
-  const flightId = input.flight_id as string
-  const flight = getFlight(flightId)
-
+  const flight = getFlight(input.flight_id as string)
   if (!flight) {
-    return JSON.stringify({
-      success: false,
-      message: `Flight ${flightId} not found. Please search for flights first.`,
-    })
+    return JSON.stringify({ success: false, message: `Flight ${input.flight_id} not found.` })
   }
-
   return JSON.stringify({
     success: true,
-    flight_id: flightId,
+    flight_id: input.flight_id,
     airline: flight.airline,
     flightNumber: flight.flightNumber,
     route: `${flight.origin} → ${flight.destination}`,
@@ -208,45 +156,26 @@ async function executeGetSeatAvailability(input: ToolInput): Promise<string> {
 }
 
 async function executeBookFlight(input: ToolInput): Promise<string> {
-  const flightId = input.flight_id as string
-  const passengerName = input.passenger_name as string
-  const passengerEmail = input.passenger_email as string
-
-  const flight = getFlight(flightId)
-
+  const flight = getFlight(input.flight_id as string)
   if (!flight) {
-    return JSON.stringify({
-      success: false,
-      message: `Flight ${flightId} not found. Cannot complete booking.`,
-    })
+    return JSON.stringify({ success: false, message: `Flight ${input.flight_id} not found.` })
   }
-
   if (flight.seats === 0) {
-    return JSON.stringify({
-      success: false,
-      message: `Sorry, flight ${flightId} (${flight.airline} ${flight.flightNumber}) is sold out. Please search for alternative flights.`,
-    })
+    return JSON.stringify({ success: false, message: `Flight ${input.flight_id} is sold out.` })
   }
-
-  const confirmationNumber = generateConfirmationNumber()
-
   return JSON.stringify({
     success: true,
     booking: {
-      confirmationNumber,
+      confirmationNumber: generateConfirmationNumber(),
       status: 'CONFIRMED',
-      passenger: {
-        name: passengerName,
-        email: passengerEmail,
-      },
+      passenger: { name: input.passenger_name, email: input.passenger_email },
       flight: {
-        flight_id: flightId,
+        flight_id: input.flight_id,
         airline: flight.airline,
         flightNumber: flight.flightNumber,
         route: `${flight.origin} → ${flight.destination}`,
         departure: flight.departureTime,
         arrival: flight.arrivalTime,
-        class: flight.class,
       },
       pricing: {
         basePrice: flight.price,
@@ -254,7 +183,6 @@ async function executeBookFlight(input: ToolInput): Promise<string> {
         totalAmount: Math.round(flight.price * 1.12),
         currency: 'USD',
       },
-      message: `Booking confirmed! A confirmation email will be sent to ${passengerEmail}.`,
     },
   })
 }
@@ -264,32 +192,28 @@ async function executeGetHotelRecommendations(input: ToolInput): Promise<string>
   const checkIn = input.check_in as string
   const checkOut = input.check_out as string
   const maxPrice = input.max_price_per_night as number | undefined
-
   const results = getHotels(city, maxPrice)
   const nights = computeNights(checkIn, checkOut)
 
   if (results.length === 0) {
     return JSON.stringify({
       success: false,
-      message: `No hotels found in ${city}${maxPrice ? ` under $${maxPrice}/night` : ''}. Try a different city or remove the price filter.`,
+      message: `No hotels found in ${city}. Try a different city or remove the price filter.`,
       hotels: [],
     })
   }
 
   return JSON.stringify({
     success: true,
-    searchParams: { city, checkIn, checkOut, nights, maxPricePerNight: maxPrice },
-    hotelCount: results.length,
+    searchParams: { city, checkIn, checkOut, nights },
     importantNote:
-      'IMPORTANT: These are hotel recommendations only. Room availability has NOT been verified. To confirm availability, the check_hotel_availability tool is required (not currently available).',
+      'IMPORTANT: These are recommendations only. Room availability has NOT been verified. The check_hotel_availability tool is required to confirm availability (not currently available).',
     hotels: results.map((h) => ({
       hotel_id: h.id,
       name: h.name,
       stars: h.stars,
       rating: h.rating,
-      reviewCount: h.reviewCount,
       address: h.address,
-      description: h.description,
       pricePerNight: h.pricePerNight,
       estimatedTotalPrice: h.pricePerNight * nights,
       nights,
@@ -297,8 +221,6 @@ async function executeGetHotelRecommendations(input: ToolInput): Promise<string>
     })),
   })
 }
-
-// ─── Main Dispatcher ──────────────────────────────────────────────────────────
 
 export async function executeTool(name: string, input: ToolInput): Promise<string> {
   switch (name) {
@@ -311,10 +233,6 @@ export async function executeTool(name: string, input: ToolInput): Promise<strin
     case 'get_hotel_recommendations':
       return executeGetHotelRecommendations(input)
     default:
-      return JSON.stringify({
-        success: false,
-        error: `Unknown tool: ${name}`,
-        message: 'This tool is not available.',
-      })
+      return JSON.stringify({ success: false, error: `Unknown tool: ${name}` })
   }
 }
