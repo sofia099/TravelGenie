@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { getFlights, getFlight, getHotels } from './mock-data'
+import { getFlights, getFlight, getHotels, getHotel, getHotelAvailability } from './mock-data'
 
 // ─── Tool Definitions ─────────────────────────────────────────────────────────
 // Only 4 tools are implemented. The hotel availability and booking tools are missing.
@@ -75,18 +75,38 @@ export const toolDefinitions: Anthropic.Tool[] = [
       required: ['city', 'check_in', 'check_out'],
     },
   },
+  {
+    name: 'check_hotel_availability',
+    description:
+      'Check real-time room availability for a specific hotel on given dates. Always use this before booking to confirm rooms are available.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        hotel_id: { type: 'string', description: 'The hotel identifier (e.g. "HT001") returned by get_hotel_recommendations' },
+        check_in: { type: 'string', description: 'Check-in date in YYYY-MM-DD format' },
+        check_out: { type: 'string', description: 'Check-out date in YYYY-MM-DD format' },
+        num_guests: { type: 'number', description: 'Number of guests (default: 1)' },
+      },
+      required: ['hotel_id', 'check_in', 'check_out'],
+    },
+  },
+  {
+    name: 'book_hotel',
+    description:
+      'Book a hotel room for a guest. Always confirm availability with check_hotel_availability first. Returns a confirmation number and booking details.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        hotel_id: { type: 'string', description: 'The hotel identifier to book' },
+        guest_name: { type: 'string', description: 'Full name of the guest' },
+        guest_email: { type: 'string', description: 'Email address for booking confirmation' },
+        check_in: { type: 'string', description: 'Check-in date in YYYY-MM-DD format' },
+        check_out: { type: 'string', description: 'Check-out date in YYYY-MM-DD format' },
+      },
+      required: ['hotel_id', 'guest_name', 'guest_email', 'check_in', 'check_out'],
+    },
+  },
 ]
-
-// ─── Missing Tools (intentionally not implemented) ────────────────────────────
-//
-// TODO: check_hotel_availability tool is not implemented yet.
-// Without this tool, the agent cannot verify hotel room availability
-// and may hallucinate availability when users ask about specific hotels.
-// This causes incorrect booking confirmations and poor user experience.
-// See: https://github.com/sofia099/TravelGenie/issues/42
-//
-// TODO: book_hotel tool is also not implemented — can't safely book without
-// first checking availability via check_hotel_availability.
 
 // ─── Tool Executor ────────────────────────────────────────────────────────────
 
@@ -207,7 +227,7 @@ async function executeGetHotelRecommendations(input: ToolInput): Promise<string>
     success: true,
     searchParams: { city, checkIn, checkOut, nights },
     importantNote:
-      'IMPORTANT: These are recommendations only. Room availability has NOT been verified. The check_hotel_availability tool is required to confirm availability (not currently available).',
+      'These are recommendations only. Use check_hotel_availability to confirm real-time room availability before booking.',
     hotels: results.map((h) => ({
       hotel_id: h.id,
       name: h.name,
@@ -222,6 +242,87 @@ async function executeGetHotelRecommendations(input: ToolInput): Promise<string>
   })
 }
 
+async function executeCheckHotelAvailability(input: ToolInput): Promise<string> {
+  const hotelId = input.hotel_id as string
+  const checkIn = input.check_in as string
+  const checkOut = input.check_out as string
+  const numGuests = (input.num_guests as number | undefined) ?? 1
+
+  const hotel = getHotel(hotelId)
+  if (!hotel) {
+    return JSON.stringify({ success: false, message: `Hotel ${hotelId} not found.` })
+  }
+
+  const availability = getHotelAvailability(hotelId, checkIn)
+  if (!availability) {
+    return JSON.stringify({ success: false, message: `No availability data for hotel ${hotelId}.` })
+  }
+
+  const nights = computeNights(checkIn, checkOut)
+  const status = !availability.available
+    ? 'SOLD_OUT'
+    : availability.roomsLeft < 3
+    ? 'FILLING_FAST'
+    : 'AVAILABLE'
+
+  return JSON.stringify({
+    success: true,
+    hotel_id: hotelId,
+    hotel_name: hotel.name,
+    check_in: checkIn,
+    check_out: checkOut,
+    nights,
+    num_guests: numGuests,
+    available: availability.available,
+    rooms_left: availability.roomsLeft,
+    status,
+    price_per_night: hotel.pricePerNight,
+    estimated_total: hotel.pricePerNight * nights,
+  })
+}
+
+async function executeBookHotel(input: ToolInput): Promise<string> {
+  const hotelId = input.hotel_id as string
+  const checkIn = input.check_in as string
+  const checkOut = input.check_out as string
+
+  const hotel = getHotel(hotelId)
+  if (!hotel) {
+    return JSON.stringify({ success: false, message: `Hotel ${hotelId} not found.` })
+  }
+
+  const availability = getHotelAvailability(hotelId, checkIn)
+  if (!availability || !availability.available) {
+    return JSON.stringify({
+      success: false,
+      message: `Hotel ${hotel.name} is not available for check-in on ${checkIn}. Please check availability for alternative dates.`,
+    })
+  }
+
+  const nights = computeNights(checkIn, checkOut)
+  return JSON.stringify({
+    success: true,
+    booking: {
+      confirmationNumber: generateConfirmationNumber(),
+      status: 'CONFIRMED',
+      guest: { name: input.guest_name, email: input.guest_email },
+      hotel: {
+        hotel_id: hotelId,
+        name: hotel.name,
+        address: hotel.address,
+        stars: hotel.stars,
+      },
+      stay: { check_in: checkIn, check_out: checkOut, nights },
+      pricing: {
+        pricePerNight: hotel.pricePerNight,
+        nights,
+        totalAmount: hotel.pricePerNight * nights,
+        currency: 'USD',
+      },
+    },
+  })
+}
+
 export async function executeTool(name: string, input: ToolInput): Promise<string> {
   switch (name) {
     case 'search_flights':
@@ -232,6 +333,10 @@ export async function executeTool(name: string, input: ToolInput): Promise<strin
       return executeBookFlight(input)
     case 'get_hotel_recommendations':
       return executeGetHotelRecommendations(input)
+    case 'check_hotel_availability':
+      return executeCheckHotelAvailability(input)
+    case 'book_hotel':
+      return executeBookHotel(input)
     default:
       return JSON.stringify({ success: false, error: `Unknown tool: ${name}` })
   }
