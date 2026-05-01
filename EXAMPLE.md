@@ -15,7 +15,7 @@ The problem is invisible in logs because the assistant isn't *crashing* — it's
 This demo walks through the full AI observability lifecycle — from a broken production app to a validated fix — in under an hour.
 
 ```
-🏗️ Build → 🔭 Instrument → 🔥 Break It → 📊 Evaluate → 🔍 Diagnose → 🌿 Branch → 🧪 Experiment → 🚀 Ship
+🏗️ Build → 🔭 Instrument → 🔥 Break It → 📊 Evaluate → 🔍 Diagnose → 🌿 Branch → 🗂️ Dataset → 🧪 Experiment → 🚀 Ship
 ```
 
 | Stage | What Happens | Time |
@@ -24,12 +24,13 @@ This demo walks through the full AI observability lifecycle — from a broken pr
 | 🔭 **Instrument** | Add Arize tracing with one Claude Code skill | 10 min |
 | 🔥 **Break It** | Generate 20 traces across all query types | 5 min |
 | 📊 **Evaluate** | Discover existing LLM provider, then create LLM-as-judge evaluators | 10 min |
-| 🔍 **Diagnose** | Analyze scores, find the root cause | 10 min |
+| 🔍 **Diagnose** | Analyze scores with the Tool Calling evaluator, find the root cause | 10 min |
 | 🌿 **Branch** | Create a git worktree for parallel development | 10 min |
+| 🗂️ **Dataset** | Export spans from production into a reusable dataset | 5 min |
 | 🧪 **Experiment** | Validate the fix with Arize Experiments before shipping | 15 min |
 | 🚀 **Ship** | Open a PR backed by experiment data | 5 min |
 
-**Total: ~70 minutes** (or trim stages to fit your slot)
+**Total: ~75 minutes** (or trim stages to fit your slot)
 
 ---
 
@@ -372,6 +373,27 @@ Return your score and a one-sentence explanation citing the specific uncovered c
 - Runs on: All spans where tool calls are expected
 - Column mappings: include `tool_definitions → llm.tools`
 
+### A Note on Span Selection for Evaluators
+
+Not every span needs every evaluator — and applying every evaluator to every span is both expensive and noisy. Before wiring up each evaluator, think about which spans actually contain the data it needs to score.
+
+For example:
+- `hallucination_detector` needs the model's response text and which tools were called — this is only meaningful on **LLM spans** or **CHAIN spans** that contain a full agent turn.
+- `tool_calling_completeness` only makes sense on spans where tool use is expected — scoring a pure text exchange with it produces meaningless results.
+- `response_correctness` is best applied to the **root CHAIN span** per user turn, not every intermediate LLM call.
+
+Arize evaluators support a `query_filter` that restricts which spans get scored. Use it to target precisely the spans that are relevant:
+
+```bash
+# Only score CHAIN spans (one per agent turn)
+--query-filter "span_kind = 'CHAIN'"
+
+# Only score spans where a tool call was expected but may not have happened
+--query-filter "span_kind = 'LLM' AND attributes.llm.tools IS NOT NULL"
+```
+
+Getting the filter right ensures your evaluator scores reflect real signal, not noise from spans that were never meant to be evaluated.
+
 ### Trigger the Evaluators
 
 After the skill creates all three evaluators, trigger them to run against the 20 traces:
@@ -389,7 +411,9 @@ Evaluators typically finish within 2-5 minutes. While they run, walk the audienc
 
 ## Stage 5: Analyze Results (10 min)
 
-The evaluators have finished. Open the Arize dashboard and navigate to **Evaluations**. Here's what the scores look like across our 20 traces, segmented by query type:
+The evaluators have finished. For this demo, we'll focus on one evaluator: **Tool Calling Completeness**. This is the most direct signal for the bug we're investigating — it specifically measures whether the agent called a tool before making factual claims. The hallucination and correctness evaluators provide supporting context, but tool calling completeness is the one that will definitively show us where the failure is and whether our fix resolved it.
+
+Open the Arize dashboard, navigate to **Evaluations**, and filter to the `tool_calling_completeness` evaluator. Here's what the scores look like across our 20 traces, segmented by query type:
 
 | Query Type | Hallucination Score | Correctness Score | Tool Calling Score |
 |---|---|---|---|
@@ -600,7 +624,37 @@ before confirming availability to a user."
 
 ---
 
-## Stage 8: Validate with Arize Experiments (15 min)
+## Stage 8: Create a Dataset from Production Traces (5 min)
+
+Before running experiments, we need a stable, reusable dataset to compare both versions against. Rather than generating synthetic test queries, we'll pull the real traces that already exist in Arize — the same ones our evaluators just scored. This ensures our experiment results are grounded in actual production behavior, not hand-crafted test cases.
+
+Since we are evaluating the tool calling, we'll specifically use **CHAIN spans**. Each CHAIN span represents one complete agent turn — the user's message in, the assistant's full response out, with all intermediate tool calls captured as children. This is the right granularity for our experiment: one row per user interaction, with a clean `input` (the user message) and `output` (the final assistant response).
+
+```bash
+# Export CHAIN spans from your Arize project
+ax spans export travelgenie-assistant \
+  --space YOUR_SPACE_NAME \
+  --limit 100 \
+  --days 7 \
+  --stdout \
+  > /tmp/chain-spans.jsonl
+
+# Create the dataset
+ax datasets create \
+  --name "travelgenie-chain-spans" \
+  --description "CHAIN spans from production — one row per agent turn" \
+  --space YOUR_SPACE_NAME \
+  --file /tmp/chain-spans.jsonl
+```
+
+> **Why CHAIN spans specifically?**
+> Your traces have three span kinds: CHAIN (one per agent turn), LLM (one per Anthropic API call), and TOOL (one per tool execution). LLM and TOOL spans are children of the CHAIN span. If you included all span kinds in your dataset, you'd end up with multiple rows per user interaction and the experiment would score intermediate steps rather than the final response. CHAIN spans give you exactly one row per user turn, which is what you want for a clean before/after comparison.
+
+Once the dataset is created, verify it in the Arize UI under **Datasets** — you should see one row per agent turn, each with an `input` (user message) and `output` (assistant response) field.
+
+---
+
+## Stage 9: Validate with Arize Experiments (15 min)
 
 We believe the fix works. But "I tested it manually" is not the same as "I have statistical evidence across a representative dataset." Arize Experiments lets us run both versions against the same 20 test queries and compare scores side by side.
 
@@ -678,7 +732,7 @@ This is the moment. The experiment doesn't just confirm the fix works — it **p
 
 ---
 
-## Stage 9: Submit the PR (5 min)
+## Stage 10: Submit the PR (5 min)
 
 The experiment proves the fix works. Now ship it.
 
