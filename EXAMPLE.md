@@ -22,12 +22,12 @@ This demo walks through the full AI observability lifecycle — from a broken pr
 |---|---|---|
 | 🏗️ **Build** | See the app running, witness the bug | 5 min |
 | 🔭 **Instrument** | Add Arize tracing with one Claude Code skill | 10 min |
-| 🔥 **Break It** | Generate 20 traces across all query types | 5 min |
-| 📊 **Evaluate** | Discover existing LLM provider, then create LLM-as-judge evaluators | 10 min |
-| 🔍 **Diagnose** | Analyze scores with the Tool Calling evaluator, find the root cause | 10 min |
-| 🌿 **Branch** | Create a git worktree for parallel development | 10 min |
-| 🗂️ **Dataset** | Export spans from production into a reusable dataset | 5 min |
-| 🧪 **Experiment** | Validate the fix with Arize Experiments before shipping | 15 min |
+| 🔥 **Generate** | Generate 20 traces across all query types | 5 min |
+| 📊 **Evaluate** | Create LLM-as-judge evaluators, Discover existing LLM provider | 10 min |
+| 🔍 **Diagnose** | Analyze scores of the evaluators, find the root cause | 10 min |
+| 🌿 **Branch** | Create multiple git worktrees for parallel development | 10 min |
+| 🗂️ **Dataset** | Export production spans into a reusable dataset | 5 min |
+| 🧪 **Experiment** | Validate the fixes with Arize Experiments before shipping | 15 min |
 | 🚀 **Ship** | Open a PR backed by experiment data | 5 min |
 
 **Total: ~75 minutes** (or trim stages to fit your slot)
